@@ -349,11 +349,40 @@ install_tailscale() {
     success "Tailscale installed."
   fi
 
-  # ── Start the daemon (hard fail if it cannot start) ───────────────────────
-  if ! systemctl enable --now tailscaled 2>/dev/null; then
-    error "tailscaled service failed to start. Check: journalctl -xeu tailscaled"
-    export TAILSCALE_IP="ERROR"
-    return 1
+  # ── Start tailscaled daemon directly (no systemctl / systemd required) ──────
+  # Create the state directory if missing
+  mkdir -p /var/lib/tailscale
+
+  if pgrep -x tailscaled &>/dev/null; then
+    info "tailscaled is already running."
+  else
+    info "Starting tailscaled daemon in the background..."
+    # Run tailscaled detached; redirect output to a log file for debugging
+    nohup tailscaled \
+      --state=/var/lib/tailscale/tailscaled.state \
+      --socket=/run/tailscale/tailscaled.sock \
+      > /var/log/tailscaled.log 2>&1 &
+
+    TAILSCALED_PID=$!
+
+    # Give it up to 10 s to become ready
+    TS_STARTED=false
+    for _ in $(seq 1 10); do
+      sleep 1
+      if tailscale status &>/dev/null; then
+        TS_STARTED=true
+        break
+      fi
+    done
+
+    if [[ "${TS_STARTED}" == "false" ]]; then
+      error "tailscaled did not start in time. Check: /var/log/tailscaled.log"
+      export TAILSCALE_IP="ERROR"
+      return 1
+    fi
+
+    success "tailscaled started (PID ${TAILSCALED_PID})."
+    info "Log file: /var/log/tailscaled.log"
   fi
 
   # ── Authenticate ─────────────────────────────────────────────────────────
