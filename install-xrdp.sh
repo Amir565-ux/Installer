@@ -24,7 +24,9 @@
 # Purpose : Install and configure xrdp remote desktop server
 # Author  : CodingBoyz  |  Edited by Ushi
 # Channel : CodingPlayz
+# Repo    : https://github.com/Amir565-ux/install-xrdp
 # Usage   : sudo bash install-xrdp.sh
+#         : sudo bash <(curl -fsSL https://raw.githubusercontent.com/Amir565-ux/install-xrdp/main/install-xrdp.sh)
 # =============================================================================
 
 set -euo pipefail
@@ -256,33 +258,209 @@ configure_firewall() {
   success "Port 3389 allowed through ufw."
 }
 
+# ─── Set RDP user password ────────────────────────────────────────────────────
+set_rdp_password() {
+  step "Set RDP user password"
+
+  echo ""
+  echo -e "${YELLOW}You can set (or change) the password for the Linux user that"
+  echo -e "will log in over RDP. Leave blank to skip.${RESET}"
+  echo ""
+
+  # List non-system users for convenience
+  echo -e "${BOLD}Regular user accounts on this machine:${RESET}"
+  awk -F: '$3 >= 1000 && $1 != "nobody" { print "  •  " $1 }' /etc/passwd
+  echo ""
+
+  rdp_user=""
+  if [[ -t 0 ]]; then
+    read -rp "Enter username to set password for (or press Enter to skip): " rdp_user
+  else
+    warn "Non-interactive mode — skipping password setup."
+    return
+  fi
+
+  # Trim whitespace
+  rdp_user="${rdp_user// /}"
+
+  if [[ -z "${rdp_user}" ]]; then
+    warn "No username entered — skipping password setup."
+    return
+  fi
+
+  # Verify the user exists
+  if ! id "${rdp_user}" &>/dev/null; then
+    warn "User '${rdp_user}' does not exist — skipping password setup."
+    return
+  fi
+
+  echo ""
+  info "Setting password for user: ${BOLD}${rdp_user}${RESET}"
+  echo -e "${CYAN}(You will be prompted twice for the new password)${RESET}"
+  echo ""
+
+  # Loop until passwords match or user aborts
+  while true; do
+    # Read password silently (no echo)
+    rdp_pass1=""
+    rdp_pass2=""
+    read -rsp "  New password       : " rdp_pass1; echo ""
+    read -rsp "  Confirm password   : " rdp_pass2; echo ""
+
+    if [[ -z "${rdp_pass1}" ]]; then
+      warn "Password cannot be empty. Try again (or press Ctrl+C to abort)."
+      continue
+    fi
+
+    if [[ "${rdp_pass1}" != "${rdp_pass2}" ]]; then
+      warn "Passwords do not match. Try again."
+      continue
+    fi
+
+    # Apply the password via chpasswd (no subshell spawning passwd interactively)
+    printf '%s:%s\n' "${rdp_user}" "${rdp_pass1}" | chpasswd
+    success "Password updated for user '${rdp_user}'."
+    break
+  done
+
+  # Unset password variables from memory immediately
+  unset rdp_pass1 rdp_pass2
+}
+
+# ─── Install Tailscale ────────────────────────────────────────────────────────
+install_tailscale() {
+  step "Installing Tailscale"
+
+  # ── Ensure curl and ca-certificates are present ──────────────────────────
+  if ! command -v curl &>/dev/null; then
+    info "curl not found — installing it first..."
+    DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates
+    success "curl installed."
+  fi
+
+  # ── Install Tailscale if not already present ──────────────────────────────
+  if command -v tailscale &>/dev/null; then
+    info "Tailscale is already installed — skipping install."
+  else
+    info "Downloading and running the official Tailscale install script..."
+    # Official vendor install method: fetched over HTTPS from tailscale.com.
+    # Running as root is required; this is the supported installation path.
+    curl -fsSL https://tailscale.com/install.sh | sh
+    success "Tailscale installed."
+  fi
+
+  # ── Start the daemon (hard fail if it cannot start) ───────────────────────
+  if ! systemctl enable --now tailscaled 2>/dev/null; then
+    error "tailscaled service failed to start. Check: journalctl -xeu tailscaled"
+    export TAILSCALE_IP="ERROR"
+    return 1
+  fi
+
+  # ── Authenticate ─────────────────────────────────────────────────────────
+  echo ""
+  echo -e "${YELLOW}${BOLD}Tailscale needs to be authenticated with your account.${RESET}"
+  echo -e "Running ${BOLD}tailscale up${RESET} — a login URL will appear below."
+  echo -e "Open it in your browser, sign in, then press Enter here to continue."
+  echo ""
+
+  # tailscale up blocks until authenticated when run interactively.
+  # If it fails (e.g. network error), report and continue with a pending state.
+  TS_AUTH_OK=true
+  tailscale up --accept-routes || TS_AUTH_OK=false
+
+  if [[ "${TS_AUTH_OK}" == "false" ]]; then
+    warn "tailscale up returned a non-zero exit. Authentication may be incomplete."
+    warn "You can authenticate later with: sudo tailscale up"
+  fi
+
+  # ── Wait for an IP (up to 60 s) ───────────────────────────────────────────
+  info "Waiting for Tailscale IP assignment (up to 60 s)..."
+  TS_IP=""
+  for _ in $(seq 1 12); do
+    TS_IP="$(tailscale ip -4 2>/dev/null || true)"
+    [[ -n "${TS_IP}" ]] && break
+    sleep 5
+  done
+
+  if [[ -n "${TS_IP}" ]]; then
+    success "Tailscale IP: ${BOLD}${TS_IP}${RESET}"
+    export TAILSCALE_IP="${TS_IP}"
+    export TAILSCALE_READY="yes"
+  else
+    warn "Tailscale IP not yet assigned — authentication may still be pending."
+    warn "After logging in, run:  tailscale ip -4"
+    export TAILSCALE_IP="pending"
+    export TAILSCALE_READY="no"
+  fi
+}
+
 # ─── Show connection info ─────────────────────────────────────────────────────
 show_connection_info() {
-  step "Installation complete"
+  step "All done — connection details"
 
-  # Retrieve the primary IP address
-  PRIMARY_IP="$(hostname -I | awk '{print $1}')"
+  LOCAL_IP="$(hostname -I | awk '{print $1}')"
+  TS_IP="${TAILSCALE_IP:-pending}"
+  TS_READY="${TAILSCALE_READY:-no}"
 
   echo ""
-  echo -e "${GREEN}${BOLD}╔══════════════════════════════════════════════╗${RESET}"
-  echo -e "${GREEN}${BOLD}║   xrdp is installed and running!             ║${RESET}"
-  echo -e "${GREEN}${BOLD}╠══════════════════════════════════════════════╣${RESET}"
-  echo -e "${GREEN}${BOLD}║${RESET}  Host / IP   : ${BOLD}${PRIMARY_IP}${RESET}"
-  echo -e "${GREEN}${BOLD}║${RESET}  Port        : ${BOLD}3389${RESET}"
-  echo -e "${GREEN}${BOLD}║${RESET}  Protocol    : RDP"
-  echo -e "${GREEN}${BOLD}║${RESET}"
-  echo -e "${GREEN}${BOLD}║${RESET}  Connect using Windows Remote Desktop (mstsc),"
-  echo -e "${GREEN}${BOLD}║${RESET}  Remmina, or any RDP-compatible client."
-  echo -e "${GREEN}${BOLD}║${RESET}"
-  echo -e "${GREEN}${BOLD}║${RESET}  Log in with your existing Linux username"
-  echo -e "${GREEN}${BOLD}║${RESET}  and password."
-  echo -e "${GREEN}${BOLD}╚══════════════════════════════════════════════╝${RESET}"
+
+  if [[ "${TS_READY}" == "yes" ]]; then
+    # ── Tailscale is connected and has an IP ─────────────────────────────────
+    echo -e "${GREEN}${BOLD}╔════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${GREEN}${BOLD}║        xrdp + Tailscale — Ready to connect!  ✔         ║${RESET}"
+    echo -e "${GREEN}${BOLD}╠════════════════════════════════════════════════════════╣${RESET}"
+    echo -e "${GREEN}${BOLD}║${RESET}"
+    echo -e "${GREEN}${BOLD}║${RESET}  ${BOLD}Connect via Tailscale (recommended):${RESET}"
+    echo -e "${GREEN}${BOLD}║${RESET}    Address  :  ${CYAN}${BOLD}${TS_IP}${RESET}"
+    echo -e "${GREEN}${BOLD}║${RESET}    Port     :  ${BOLD}3389${RESET}"
+    echo -e "${GREEN}${BOLD}║${RESET}"
+    echo -e "${GREEN}${BOLD}║${RESET}  ${BOLD}Local network (same LAN only):${RESET}"
+    echo -e "${GREEN}${BOLD}║${RESET}    Address  :  ${LOCAL_IP}"
+    echo -e "${GREEN}${BOLD}║${RESET}    Port     :  3389"
+    echo -e "${GREEN}${BOLD}║${RESET}"
+    echo -e "${GREEN}${BOLD}╠════════════════════════════════════════════════════════╣${RESET}"
+    echo -e "${GREEN}${BOLD}║${RESET}  ${BOLD}How to connect:${RESET}"
+    echo -e "${GREEN}${BOLD}║${RESET}   Windows  → Win+R → mstsc → enter ${CYAN}${TS_IP}:3389${RESET}"
+    echo -e "${GREEN}${BOLD}║${RESET}   macOS    → Microsoft Remote Desktop → Add PC"
+    echo -e "${GREEN}${BOLD}║${RESET}   Linux    → Remmina → New → RDP → ${CYAN}${TS_IP}${RESET}"
+    echo -e "${GREEN}${BOLD}║${RESET}   Android  → RD Client app → Add PC → ${CYAN}${TS_IP}${RESET}"
+    echo -e "${GREEN}${BOLD}║${RESET}"
+    echo -e "${GREEN}${BOLD}║${RESET}  Log in with your Linux username & the password"
+    echo -e "${GREEN}${BOLD}║${RESET}  you set during this script (or your existing one)."
+    echo -e "${GREEN}${BOLD}║${RESET}"
+    echo -e "${GREEN}${BOLD}║${RESET}  ${YELLOW}⚠  Tailscale must also be installed on your client device.${RESET}"
+    echo -e "${GREEN}${BOLD}║${RESET}     → https://tailscale.com/download"
+    echo -e "${GREEN}${BOLD}╚════════════════════════════════════════════════════════╝${RESET}"
+  else
+    # ── Tailscale authentication is still pending ────────────────────────────
+    echo -e "${YELLOW}${BOLD}╔════════════════════════════════════════════════════════╗${RESET}"
+    echo -e "${YELLOW}${BOLD}║     xrdp installed — Tailscale auth pending  ⚠         ║${RESET}"
+    echo -e "${YELLOW}${BOLD}╠════════════════════════════════════════════════════════╣${RESET}"
+    echo -e "${YELLOW}${BOLD}║${RESET}"
+    echo -e "${YELLOW}${BOLD}║${RESET}  xrdp is running and ready on port ${BOLD}3389${RESET}."
+    echo -e "${YELLOW}${BOLD}║${RESET}  Tailscale is installed but not yet authenticated."
+    echo -e "${YELLOW}${BOLD}║${RESET}"
+    echo -e "${YELLOW}${BOLD}║${RESET}  ${BOLD}To finish Tailscale setup, run:${RESET}"
+    echo -e "${YELLOW}${BOLD}║${RESET}    ${CYAN}sudo tailscale up${RESET}"
+    echo -e "${YELLOW}${BOLD}║${RESET}  Then open the login URL shown and sign in."
+    echo -e "${YELLOW}${BOLD}║${RESET}"
+    echo -e "${YELLOW}${BOLD}║${RESET}  ${BOLD}Once authenticated, get your Tailscale IP:${RESET}"
+    echo -e "${YELLOW}${BOLD}║${RESET}    ${CYAN}tailscale ip -4${RESET}"
+    echo -e "${YELLOW}${BOLD}║${RESET}"
+    echo -e "${YELLOW}${BOLD}║${RESET}  ${BOLD}Local network fallback (same LAN only):${RESET}"
+    echo -e "${YELLOW}${BOLD}║${RESET}    Address  :  ${LOCAL_IP}"
+    echo -e "${YELLOW}${BOLD}║${RESET}    Port     :  3389"
+    echo -e "${YELLOW}${BOLD}║${RESET}"
+    echo -e "${YELLOW}${BOLD}║${RESET}  Install Tailscale on your client: https://tailscale.com/download"
+    echo -e "${YELLOW}${BOLD}╚════════════════════════════════════════════════════════╝${RESET}"
+  fi
+
   echo ""
-  echo -e "${MAGENTA}${BOLD}  ──────────────────────────────────────────────${RESET}"
-  echo -e "${MAGENTA}${BOLD}   🎬  Thanks for using CodingBoyz scripts!     ${RESET}"
-  echo -e "${YELLOW}${BOLD}   👉  Subscribe to CodingPlayz on YouTube!     ${RESET}"
-  echo -e "${MAGENTA}${BOLD}   ✏️   Edited by Ushi                          ${RESET}"
-  echo -e "${MAGENTA}${BOLD}  ──────────────────────────────────────────────${RESET}"
+  echo -e "${MAGENTA}${BOLD}  ──────────────────────────────────────────────────────${RESET}"
+  echo -e "${MAGENTA}${BOLD}   🎬  Thanks for using CodingBoyz scripts!             ${RESET}"
+  echo -e "${YELLOW}${BOLD}   👉  Subscribe to CodingPlayz on YouTube!             ${RESET}"
+  echo -e "${MAGENTA}${BOLD}   ✏️   Edited by Ushi                                  ${RESET}"
+  echo -e "${MAGENTA}${BOLD}  ──────────────────────────────────────────────────────${RESET}"
   echo ""
 }
 
@@ -297,6 +475,8 @@ main() {
   configure_xrdp
   enable_xrdp_service
   configure_firewall
+  set_rdp_password
+  install_tailscale
   show_connection_info
 }
 
