@@ -211,29 +211,56 @@ EOF
     success "XFCE4 session configured for xrdp."
   fi
 
-  # Backup original xrdp.ini then set port to 3389
+  # Backup original xrdp.ini then enforce port + listen on ALL interfaces
   XRDP_INI="/etc/xrdp/xrdp.ini"
   if [[ -f "${XRDP_INI}" ]]; then
     cp "${XRDP_INI}" "${XRDP_INI}.bak.$(date +%Y%m%d%H%M%S)"
-    # Ensure port is 3389
+
+    # Port 3389
     sed -i 's/^port=.*/port=3389/' "${XRDP_INI}"
     info "xrdp port set to 3389."
+
+    # Bind to ALL interfaces including Tailscale (100.x.x.x)
+    # Remove any existing address= line and add a clean one under [globals]
+    sed -i '/^address=/d' "${XRDP_INI}"
+    sed -i '/^\[globals\]/a address=0.0.0.0' "${XRDP_INI}"
+    info "xrdp set to listen on all interfaces (0.0.0.0) — includes Tailscale IP."
   fi
 
   success "xrdp configuration complete."
 }
 
-# ─── Enable and start xrdp service ───────────────────────────────────────────
+# ─── Enable and start xrdp service (no systemctl required) ───────────────────
 enable_xrdp_service() {
-  step "Enabling and starting xrdp service"
+  step "Starting xrdp service"
 
-  systemctl enable xrdp
-  systemctl restart xrdp
+  # Kill any existing xrdp processes cleanly before starting fresh
+  pkill -x xrdp      2>/dev/null || true
+  pkill -x xrdp-sesman 2>/dev/null || true
+  sleep 1
 
-  if systemctl is-active --quiet xrdp; then
-    success "xrdp service is running."
+  # Try service command first (works on init.d systems too)
+  if command -v service &>/dev/null; then
+    service xrdp start 2>/dev/null && true
+  fi
+
+  # If xrdp is still not running, start it directly
+  if ! pgrep -x xrdp &>/dev/null; then
+    info "Starting xrdp directly..."
+    mkdir -p /var/run/xrdp
+    /usr/sbin/xrdp-sesman &>/var/log/xrdp-sesman.log &
+    sleep 1
+    /usr/sbin/xrdp --nodaemon &>/var/log/xrdp.log &
+    sleep 2
+  fi
+
+  # Verify xrdp is listening on 3389
+  if ss -tlnp 2>/dev/null | grep -q ':3389'; then
+    success "xrdp is running and listening on port 3389."
+  elif pgrep -x xrdp &>/dev/null; then
+    success "xrdp process is running."
   else
-    error "xrdp failed to start. Check logs: journalctl -xeu xrdp"
+    error "xrdp failed to start. Check logs: /var/log/xrdp.log"
     exit 1
   fi
 }
@@ -253,9 +280,12 @@ configure_firewall() {
     return
   fi
 
-  info "ufw is active — allowing RDP port 3389..."
+  info "ufw is active — allowing RDP port 3389 on all interfaces + tailscale0..."
+  # Allow on all interfaces (catches LAN connections)
   ufw allow 3389/tcp
-  success "Port 3389 allowed through ufw."
+  # Explicitly allow on tailscale0 so Tailscale traffic is never blocked
+  ufw allow in on tailscale0 to any port 3389 proto tcp
+  success "Port 3389 allowed through ufw (LAN + Tailscale interface)."
 }
 
 # ─── Set RDP user password ────────────────────────────────────────────────────
@@ -301,29 +331,42 @@ set_rdp_password() {
 
   # Loop until passwords match or user aborts
   while true; do
-    # Read password silently (no echo)
     rdp_pass1=""
     rdp_pass2=""
-    read -rsp "  New password       : " rdp_pass1; echo ""
-    read -rsp "  Confirm password   : " rdp_pass2; echo ""
+
+    # Force terminal echo OFF before reading — works even on minimal terminals
+    stty -echo 2>/dev/null || true
+    printf "  New password       : "
+    IFS= read -r rdp_pass1
+    printf "\n"
+
+    stty -echo 2>/dev/null || true
+    printf "  Confirm password   : "
+    IFS= read -r rdp_pass2
+    printf "\n"
+
+    # Restore terminal echo immediately after reading
+    stty echo 2>/dev/null || true
 
     if [[ -z "${rdp_pass1}" ]]; then
       warn "Password cannot be empty. Try again (or press Ctrl+C to abort)."
       continue
     fi
 
-    if [[ "${rdp_pass1}" != "${rdp_pass2}" ]]; then
+    # Compare using length + character match to avoid any whitespace issues
+    if [[ "${#rdp_pass1}" -ne "${#rdp_pass2}" ]] || [[ "${rdp_pass1}" != "${rdp_pass2}" ]]; then
       warn "Passwords do not match. Try again."
       continue
     fi
 
-    # Apply the password via chpasswd (no subshell spawning passwd interactively)
+    # Apply via chpasswd — no interactive passwd, no visible output
     printf '%s:%s\n' "${rdp_user}" "${rdp_pass1}" | chpasswd
     success "Password updated for user '${rdp_user}'."
     break
   done
 
-  # Unset password variables from memory immediately
+  # Restore echo just in case and wipe password variables
+  stty echo 2>/dev/null || true
   unset rdp_pass1 rdp_pass2
 }
 
@@ -350,26 +393,27 @@ install_tailscale() {
   fi
 
   # ── Start tailscaled daemon directly (no systemctl / systemd required) ──────
-  # Create the state directory if missing
+  # Create BOTH required directories before starting
   mkdir -p /var/lib/tailscale
+  mkdir -p /run/tailscale          # socket directory — missing this causes silent failure
 
   if pgrep -x tailscaled &>/dev/null; then
     info "tailscaled is already running."
   else
     info "Starting tailscaled daemon in the background..."
-    # Run tailscaled detached; redirect output to a log file for debugging
     nohup tailscaled \
       --state=/var/lib/tailscale/tailscaled.state \
       --socket=/run/tailscale/tailscaled.sock \
+      --tun=tailscale0 \
       > /var/log/tailscaled.log 2>&1 &
 
     TAILSCALED_PID=$!
 
-    # Give it up to 10 s to become ready
+    # Give it up to 15 s to become ready
     TS_STARTED=false
-    for _ in $(seq 1 10); do
+    for _ in $(seq 1 15); do
       sleep 1
-      if tailscale status &>/dev/null; then
+      if tailscale status &>/dev/null 2>&1; then
         TS_STARTED=true
         break
       fi
