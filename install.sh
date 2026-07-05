@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # ======================================================
-#   MASTER SCRIPT: CodingBoyz XRDP Auto-Installer v1
-#   Run via: bash <(curl -fsSL https://raw.githubusercontent.com/Amir565-ux/install-xrdp/main/install.sh)
+#   MASTER SCRIPT: CodingBoyz XRDP Auto-Installer
+#   Run via: bash <(curl -sL <YOUR_GITHUB_RAW_LINK>)
 # ======================================================
 
 export DEBIAN_FRONTEND=noninteractive
@@ -29,7 +29,7 @@ apt-get install -y figlet > /dev/null 2>&1
 echo -e "${CYAN}"
 figlet -w 120 -c "CodingBoyz"
 echo -e "${NC}"
-echo -e "${DIM}                     V1 Subscribe to CodingBoyz${NC}"
+echo -e "${DIM}                     Subscribe to CodingBoyz${NC}"
 echo ""
 echo -e "${YELLOW}============================================================${NC}"
 echo ""
@@ -145,14 +145,71 @@ echo -e "${GREEN}       [DONE] User '$USERNAME' is ready for login.${NC}"
 echo ""
 
 # ------------------------------------------------------
-# STEP 7: Install Tailscale on VPS
+# STEP 7: Install Tailscale & Get Login URL
 # ------------------------------------------------------
-echo -e "${BOLD}${WHITE}[5/5] Installing Tailscale on this VPS...${NC}"
+echo -e "${BOLD}${WHITE}[5/5] Installing Tailscale...${NC}"
 curl -fsSL https://tailscale.com/install.sh | sh > /dev/null 2>&1
 systemctl enable tailscaled > /dev/null 2>&1
 systemctl start tailscaled > /dev/null 2>&1
-echo -e "${GREEN}       [DONE] Tailscale installed on VPS.${NC}"
+
+# Start tailscale login to get the clickable URL
+TS_OUTPUT=$(tailscale up 2>&1)
+TS_LOGIN_URL=$(echo "$TS_OUTPUT" | grep -oP 'https://login\.tailscale\.com/a/[a-zA-Z0-9]+' | head -1)
+
+echo -e "${GREEN}       [DONE] Tailscale Installed.${NC}"
 echo ""
+
+# ------------------------------------------------------
+# STEP 8: Show Login URL & Wait for Connection
+# ------------------------------------------------------
+echo -e "${CYAN}============================================================${NC}"
+echo -e "${BOLD}${WHITE}              CONNECT THIS VPS TO TAILSCALE${NC}"
+echo -e "${CYAN}============================================================${NC}"
+echo ""
+
+if [ -n "$TS_LOGIN_URL" ]; then
+    echo -e "${YELLOW}  Click this link in your browser to authenticate:${NC}"
+    echo ""
+    echo -e "${CYAN}  ┌──────────────────────────────────────────────────────────┐${NC}"
+    echo -e "${CYAN}  │${NC} ${BOLD}${GREEN}$TS_LOGIN_URL${NC}"
+    echo -e "${CYAN}  └──────────────────────────────────────────────────────────┘${NC}"
+    echo ""
+    echo -e "${WHITE}  If you don't have Tailscale on your PC, download it from:${NC}"
+    echo -e "${GREEN}  https://tailscale.com/download${NC}"
+    echo ""
+    echo -e "${YELLOW}  Waiting for you to click and authenticate...${NC}"
+    echo ""
+
+    # Wait for Tailscale to connect (check every 2 seconds, max 120 seconds)
+    CONNECTED=0
+    for i in $(seq 1 60); do
+        if tailscale status 2>/dev/null | grep -q "connected"; then
+            CONNECTED=1
+            break
+        fi
+        sleep 2
+        # Show a spinner/dot
+        printf "${DIM}."
+    done
+    echo ""
+    echo ""
+
+    if [ $CONNECTED -eq 1 ]; then
+        TS_IP=$(tailscale ip -4 2>/dev/null)
+        echo -e "${GREEN}  [SUCCESS] Tailscale connected! IP: $TS_IP${NC}"
+        echo ""
+    else
+        echo -e "${RED}  [TIMEOUT] Tailscale did not connect in time.${NC}"
+        echo -e "${YELLOW}  You can connect manually later: tailscale up${NC}"
+        echo ""
+        TS_IP=""
+    fi
+else
+    echo -e "${RED}  [ERROR] Could not generate Tailscale login URL.${NC}"
+    echo -e "${YELLOW}  Connect manually later: tailscale up${NC}"
+    echo ""
+    TS_IP=""
+fi
 
 # ------------------------------------------------------
 # Gather Public IP
@@ -168,39 +225,33 @@ echo -e "${BOLD}${GREEN}              ██  XRDP INSTALLED  ██${NC}"
 echo ""
 echo -e "${CYAN}============================================================${NC}"
 echo ""
-echo -e "${BOLD}${WHITE}  Connection Details:${NC}"
+
+if [ -n "$TS_IP" ]; then
+    echo -e "${BOLD}${WHITE}  Connect via Tailscale (Recommended):${NC}"
+    echo ""
+    echo -e "${CYAN}  ┌────────────────────────────────────────────┐${NC}"
+    echo -e "${CYAN}  │${NC} ${WHITE}Tailscale IP : ${GREEN}$TS_IP${NC}"
+    echo -e "${CYAN}  │${NC} ${WHITE}Port        : ${GREEN}3389${NC}"
+    echo -e "${CYAN}  │${NC} ${WHITE}Username    : ${GREEN}$USERNAME${NC}"
+    echo -e "${CYAN}  │${NC} ${WHITE}Password    : ${GREEN}$PASSWORD${NC}"
+    echo -e "${CYAN}  └────────────────────────────────────────────┘${NC}"
+    echo ""
+    echo -e "${WHITE}  RDP Link : ${GREEN}rdp://$TS_IP:3389${NC}"
+    echo ""
+fi
+
+echo -e "${BOLD}${WHITE}  Connect via Public IP (Alternative):${NC}"
 echo ""
 echo -e "${CYAN}  ┌────────────────────────────────────────────┐${NC}"
-echo -e "${CYAN}  │${NC} ${WHITE}Public IP  : ${GREEN}$PUBLIC_IP${NC}"
-echo -e "${CYAN}  │${NC} ${WHITE}Port       : ${GREEN}3389${NC}"
-echo -e "${CYAN}  │${NC} ${WHITE}Username   : ${GREEN}$USERNAME${NC}"
-echo -e "${CYAN}  │${NC} ${WHITE}Password   : ${GREEN}$PASSWORD${NC}"
+echo -e "${CYAN}  │${NC} ${WHITE}Public IP   : ${GREEN}$PUBLIC_IP${NC}"
+echo -e "${CYAN}  │${NC} ${WHITE}Port        : ${GREEN}3389${NC}"
+echo -e "${CYAN}  │${NC} ${WHITE}Username    : ${GREEN}$USERNAME${NC}"
+echo -e "${CYAN}  │${NC} ${WHITE}Password    : ${GREEN}$PASSWORD${NC}"
 echo -e "${CYAN}  └────────────────────────────────────────────┘${NC}"
 echo ""
-echo -e "${WHITE}  RDP Connection String : ${GREEN}rdp://$PUBLIC_IP:3389${NC}"
+echo -e "${WHITE}  RDP Link : ${GREEN}rdp://$PUBLIC_IP:3389${NC}"
 echo ""
-echo -e "${CYAN}============================================================${NC}"
-echo -e "${BOLD}${YELLOW}  HOW TO CONNECT VIA TAILSCALE:${NC}"
-echo -e "${CYAN}============================================================${NC}"
-echo ""
-echo -e "${WHITE}  Step 1 : Install Tailscale on YOUR PC/Mac from this link:${NC}"
-echo -e "${GREEN}           https://tailscale.com/download${NC}"
-echo ""
-echo -e "${WHITE}  Step 2 : Login to Tailscale on your PC with your account.${NC}"
-echo ""
-echo -e "${WHITE}  Step 3 : Go to Tailscale Admin Console:${NC}"
-echo -e "${GREEN}           https://login.tailscale.com/admin/machines${NC}"
-echo ""
-echo -e "${WHITE}  Step 4 : Find this VPS (${PUBLIC_IP}) and click '...'^|'Approve'.${NC}"
-echo ""
-echo -e "${WHITE}  Step 5 : On this VPS, run this command to connect:${NC}"
-echo -e "${GREEN}           tailscale up --accept-routes${NC}"
-echo ""
-echo -e "${WHITE}  Step 6 : Get your Tailscale IP by running:${NC}"
-echo -e "${GREEN}           tailscale ip -4${NC}"
-echo ""
-echo -e "${WHITE}  Step 7 : Open RDP on your PC and connect to that Tailscale IP.${NC}"
-echo ""
+
 echo -e "${CYAN}============================================================${NC}"
 echo -e "${DIM}                     Subscribe to CodingBoyz${NC}"
 echo -e "${CYAN}============================================================${NC}"
