@@ -87,10 +87,9 @@ show_menu() {
 }
 
 # ==========================================
-# NEW EDIT CONFIGURATION MENU
+# EDIT CONFIGURATION MENU
 # ==========================================
 edit_config() {
-    # Load current settings if they exist, otherwise set defaults
     if [ -f ".vps_env" ]; then
         source .vps_env
     else
@@ -104,35 +103,39 @@ edit_config() {
     echo -e "${YELLOW}💡 Leave blank and press ENTER to keep the current value!${NC}"
     echo -e "${DARK_BLUE}----------------------------------------------------------${NC}"
     
-    # RAM
     echo -ne "${LIGHT_BLUE}🔹 RAM Size in GB [Current: ${GREEN}${RAM_GB}${LIGHT_BLUE}]: ${NC}"
     read NEW_RAM
     RAM_GB=${NEW_RAM:-$RAM_GB}
     
-    # CPU
     echo -ne "${LIGHT_BLUE}🔹 CPU Cores [Current: ${GREEN}${CPU_CORES}${LIGHT_BLUE}]: ${NC}"
     read NEW_CPU
     CPU_CORES=${NEW_CPU:-$CPU_CORES}
     
-    # Storage
     echo -ne "${LIGHT_BLUE}🔹 Disk Space to ADD in GB [Current: ${GREEN}${DISK_ADD}${LIGHT_BLUE}]: ${NC}"
     read NEW_DISK
     DISK_ADD=${NEW_DISK:-$DISK_ADD}
     
-    # Username
     echo -ne "${LIGHT_BLUE}🔹 VM Username [Current: ${GREEN}${USER_NAME}${LIGHT_BLUE}]: ${NC}"
     read NEW_USER
     USER_NAME=${NEW_USER:-$USER_NAME}
     
-    # Password
     echo -ne "${LIGHT_BLUE}🔹 VM Login Password [Current: ${GREEN}${USER_PASS}${LIGHT_BLUE}]: ${NC}"
     read NEW_PASS
     USER_PASS=${NEW_PASS:-$USER_PASS}
     
     echo -e "${DARK_BLUE}----------------------------------------------------------${NC}"
     
-    # Regenerate the cloud-init file with the new username and password
-    loading_bar "Applying new user credentials"
+    # THE FIX: Wipe the old cloud-init state so Ubuntu accepts the new password
+    if [ -f "/home/daytona/ubuntu22.qcow2" ]; then
+        loading_bar "Resetting VM password lock state"
+        $SUDO_CMD virt-customize -a /home/daytona/ubuntu22.qcow2 --run-command 'rm -rf /var/lib/cloud/instances/*' 2>/dev/null || \
+        $SUDO_CMD qemu-nbd --connect=/dev/nbd0 /home/daytona/ubuntu22.qcow2 2>/dev/null && \
+        $SUDO_CMD mkdir -p /mnt/vm && $SUDO_CMD mount /dev/nbd0p1 /mnt/vm 2>/dev/null && \
+        $SUDO_CMD rm -rf /mnt/vm/var/lib/cloud/instances/* 2>/dev/null && \
+        $SUDO_CMD umount /mnt/vm 2>/dev/null && $SUDO_CMD qemu-nbd --disconnect /dev/nbd0 2>/dev/null
+    fi
+
+    # Recreate the seed.img with new password
     cat <<EOF > user-data
 #cloud-config
 disable_root: false
@@ -148,17 +151,16 @@ runcmd:
 EOF
     cloud-localds seed.img user-data > /dev/null 2>&1
     
-    # Resize disk if the user changed the storage value
+    # Resize disk if changed
     if [ ! -z "$NEW_DISK" ] && [ -f "/home/daytona/ubuntu22.qcow2" ]; then
         loading_bar "Resizing virtual hard disk"
         $SUDO_CMD qemu-img resize /home/daytona/ubuntu22.qcow2 +${DISK_ADD}G > /dev/null 2>&1
     fi
 
-    # Save everything to .vps_env
     save_env
     
-    echo -e "${GREEN}✅ Configuration updated successfully!${NC}"
-    echo -e "${YELLOW}👉 Select Option [2] Restart Instance to apply hardware changes.${NC}"
+    echo -e "${GREEN}✅ Configuration & Password updated successfully!${NC}"
+    echo -e "${YELLOW}👉 Select Option [2] Restart Instance to apply changes.${NC}"
     sleep 3
     show_menu
 }
@@ -178,7 +180,6 @@ create_vps() {
     echo -ne "${BRIGHT_BLUE}🔹 Enter Disk Space to ADD in GB (e.g., 10, 20): ${NC}"
     read DISK_ADD
     
-    # DEFAULT CHANGED TO ROOT
     echo -ne "${BRIGHT_BLUE}🔹 Create Username (Default: root): ${NC}"
     read USER_NAME
     USER_NAME=${USER_NAME:-root}
@@ -187,7 +188,6 @@ create_vps() {
     read USER_PASS
     USER_PASS=${USER_PASS:-1234}
     
-    # 2222 is set as the foundational port base
     TCP_HOST_PORT=${TCP_HOST_PORT:-2222}
     TCP_GUEST_PORT=22
 
@@ -210,7 +210,6 @@ create_vps() {
     
     loading_bar "Generating Cloud-Init Matrix"
     
-    # ADDED: disable_root: false & ssh_pwauth: True to allow Root Login
     cat <<EOF > user-data
 #cloud-config
 disable_root: false
@@ -282,7 +281,7 @@ boot_qemu() {
         echo -e "${GREEN}👉 $SSHX_URL 👈${NC}"
     else
         echo -e "${YELLOW}ℹ️  Web tunnel skipped (Firewall/Network restriction).${NC}"
-        echo -e "${GREEN}✅ To connect manually: ssh ${USER_NAME:-root}@localhost -p ${TCP_HOST_PORT}${NC}"
+        echo -e "${GREEN}✅ To connect: ssh ${USER_NAME:-root}@localhost -p ${TCP_HOST_PORT}${NC}"
     fi
     
     echo -e "${DARK_BLUE}----------------------------------------------------------${NC}"
