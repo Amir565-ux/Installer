@@ -70,7 +70,7 @@ show_menu() {
     echo ""
     echo -e "  ${BRIGHT_BLUE}[1]${NC} Create Ubuntu Instance"
     echo -e "  ${BRIGHT_BLUE}[2]${NC} Restart Instance"
-    echo -e "  ${BRIGHT_BLUE}[3]${NC} Connect to Instance (Auto-Login)"
+    echo -e "  ${BRIGHT_BLUE}[3]${NC} Edit Configuration"
     echo -e "  ${BRIGHT_BLUE}[4]${NC} Exit"
     echo ""
     echo -e "${DARK_BLUE}==========================================================${NC}"
@@ -80,10 +80,87 @@ show_menu() {
     case $CHOICE in
         1) create_vps ;;
         2) restart_vps ;;
-        3) auto_connect ;;
+        3) edit_config ;;
         4) exit 0 ;;
         *) echo -e "${RED}❌ Invalid Choice! Please select 1-4.${NC}"; sleep 2; show_menu ;;
     esac
+}
+
+# ==========================================
+# NEW EDIT CONFIGURATION MENU
+# ==========================================
+edit_config() {
+    # Load current settings if they exist, otherwise set defaults
+    if [ -f ".vps_env" ]; then
+        source .vps_env
+    else
+        RAM_GB=4; CPU_CORES=2; DISK_ADD=10; USER_NAME=root; USER_PASS=1234; TCP_HOST_PORT=2222
+    fi
+
+    clear
+    echo -e "${DARK_BLUE}==========================================================${NC}"
+    echo -e "${BRIGHT_BLUE}                 ⚙️ EDIT VM CONFIGURATION ⚙️                ${NC}"
+    echo -e "${DARK_BLUE}==========================================================${NC}"
+    echo -e "${YELLOW}💡 Leave blank and press ENTER to keep the current value!${NC}"
+    echo -e "${DARK_BLUE}----------------------------------------------------------${NC}"
+    
+    # RAM
+    echo -ne "${LIGHT_BLUE}🔹 RAM Size in GB [Current: ${GREEN}${RAM_GB}${LIGHT_BLUE}]: ${NC}"
+    read NEW_RAM
+    RAM_GB=${NEW_RAM:-$RAM_GB}
+    
+    # CPU
+    echo -ne "${LIGHT_BLUE}🔹 CPU Cores [Current: ${GREEN}${CPU_CORES}${LIGHT_BLUE}]: ${NC}"
+    read NEW_CPU
+    CPU_CORES=${NEW_CPU:-$CPU_CORES}
+    
+    # Storage
+    echo -ne "${LIGHT_BLUE}🔹 Disk Space to ADD in GB [Current: ${GREEN}${DISK_ADD}${LIGHT_BLUE}]: ${NC}"
+    read NEW_DISK
+    DISK_ADD=${NEW_DISK:-$DISK_ADD}
+    
+    # Username
+    echo -ne "${LIGHT_BLUE}🔹 VM Username [Current: ${GREEN}${USER_NAME}${LIGHT_BLUE}]: ${NC}"
+    read NEW_USER
+    USER_NAME=${NEW_USER:-$USER_NAME}
+    
+    # Password
+    echo -ne "${LIGHT_BLUE}🔹 VM Login Password [Current: ${GREEN}${USER_PASS}${LIGHT_BLUE}]: ${NC}"
+    read NEW_PASS
+    USER_PASS=${NEW_PASS:-$USER_PASS}
+    
+    echo -e "${DARK_BLUE}----------------------------------------------------------${NC}"
+    
+    # Regenerate the cloud-init file with the new username and password
+    loading_bar "Applying new user credentials"
+    cat <<EOF > user-data
+#cloud-config
+disable_root: false
+ssh_pwauth: True
+chpasswd:
+  list: |
+    ${USER_NAME}:${USER_PASS}
+  expire: False
+runcmd:
+  - sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  - sed -i 's/^PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  - systemctl restart sshd
+EOF
+    cloud-localds seed.img user-data > /dev/null 2>&1
+    
+    # Resize disk if the user changed the storage value
+    if [ ! -z "$NEW_DISK" ] && [ -f "/home/daytona/ubuntu22.qcow2" ]; then
+        loading_bar "Resizing virtual hard disk"
+        $SUDO_CMD qemu-img resize /home/daytona/ubuntu22.qcow2 +${DISK_ADD}G > /dev/null 2>&1
+    fi
+
+    # Save everything to .vps_env
+    save_env
+    
+    echo -e "${GREEN}✅ Configuration updated successfully!${NC}"
+    echo -e "${YELLOW}👉 Select Option [2] Restart Instance to apply hardware changes.${NC}"
+    sleep 3
+    show_menu
 }
 
 # STEP 1: CREATE & BOOT NEW UBUNTU VPS INSTANCE
@@ -100,9 +177,12 @@ create_vps() {
     read CPU_CORES
     echo -ne "${BRIGHT_BLUE}🔹 Enter Disk Space to ADD in GB (e.g., 10, 20): ${NC}"
     read DISK_ADD
-    echo -ne "${BRIGHT_BLUE}🔹 Create Username (Default: ubuntu): ${NC}"
+    
+    # DEFAULT CHANGED TO ROOT
+    echo -ne "${BRIGHT_BLUE}🔹 Create Username (Default: root): ${NC}"
     read USER_NAME
-    USER_NAME=${USER_NAME:-ubuntu}
+    USER_NAME=${USER_NAME:-root}
+    
     echo -ne "${BRIGHT_BLUE}🔹 Create Password (Default: 1234): ${NC}"
     read USER_PASS
     USER_PASS=${USER_PASS:-1234}
@@ -116,10 +196,8 @@ create_vps() {
     echo ""
     
     $SUDO_CMD apt-get update -y > /dev/null 2>&1
-    # Added openssh-client and sshpass here automatically
     $SUDO_CMD apt-get install -y qemu-system-x86 qemu-utils wget cloud-image-utils curl openssh-client sshpass > /dev/null 2>&1
     
-    # Custom absolute path architecture build
     $SUDO_CMD mkdir -p /home/daytona > /dev/null 2>&1
     
     if [ ! -f "/home/daytona/ubuntu22.qcow2" ]; then
@@ -131,13 +209,20 @@ create_vps() {
     fi
     
     loading_bar "Generating Cloud-Init Matrix"
+    
+    # ADDED: disable_root: false & ssh_pwauth: True to allow Root Login
     cat <<EOF > user-data
 #cloud-config
+disable_root: false
 ssh_pwauth: True
 chpasswd:
   list: |
     ${USER_NAME}:${USER_PASS}
   expire: False
+runcmd:
+  - sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  - sed -i 's/^PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  - systemctl restart sshd
 EOF
 
     cloud-localds seed.img user-data > /dev/null 2>&1
@@ -150,15 +235,16 @@ EOF
 
 # SAVE ENVIRONMENT VARIABLES
 save_env() {
-    echo "RAM_GB=${RAM_GB:-32}" > .vps_env
-    echo "CPU_CORES=${CPU_CORES:-4}" >> .vps_env
-    echo "USER_NAME=${USER_NAME:-ubuntu}" >> .vps_env
+    echo "RAM_GB=${RAM_GB:-4}" > .vps_env
+    echo "CPU_CORES=${CPU_CORES:-2}" >> .vps_env
+    echo "DISK_ADD=${DISK_ADD:-10}" >> .vps_env
+    echo "USER_NAME=${USER_NAME:-root}" >> .vps_env
     echo "USER_PASS=${USER_PASS:-1234}" >> .vps_env
     echo "TCP_HOST_PORT=${TCP_HOST_PORT:-2222}" >> .vps_env
     echo "TCP_GUEST_PORT=${TCP_GUEST_PORT:-22}" >> .vps_env
 }
 
-# BOOT QEMU INSTANCE (FIXED VERSION - HIDES FIREWALL ERRORS)
+# BOOT QEMU INSTANCE
 boot_qemu() {
     if [ -f ".vps_env" ]; then
         source .vps_env
@@ -166,7 +252,7 @@ boot_qemu() {
 
     TCP_HOST_PORT=${TCP_HOST_PORT:-2222}
     TCP_GUEST_PORT=${TCP_GUEST_PORT:-22}
-    RAM_VALUE="${RAM_GB:-32}G"
+    RAM_VALUE="${RAM_GB:-4}G"
 
     clear
     echo -e "${DARK_BLUE}==========================================================${NC}"
@@ -174,7 +260,6 @@ boot_qemu() {
     echo -e "${DARK_BLUE}==========================================================${NC}"
     echo ""
     
-    # Run sshx in background and HIDE ALL ERRORS completely
     sshx_log=$(mktemp)
     { curl -sSf https://sshx.io/get | sh -s run > "$sshx_log" 2>&1 & } 2>/dev/null
     
@@ -186,9 +271,9 @@ boot_qemu() {
     echo -e "${DARK_BLUE}==========================================================${NC}"
     echo -e "${BRIGHT_BLUE}🎉            CODINGBOYZ - VM NETWORK ACTIVE            ${NC}"
     echo -e "${DARK_BLUE}==========================================================${NC}"
-    echo -e "${WHITE}👤 Username : ${LIGHT_BLUE}${USER_NAME:-ubuntu}${NC}"
+    echo -e "${WHITE}👤 Username : ${LIGHT_BLUE}${USER_NAME:-root}${NC}"
     echo -e "${WHITE}🔑 Password : ${LIGHT_BLUE}${USER_PASS:-1234}${NC}"
-    echo -e "${WHITE}⚙️  Resources: ${LIGHT_BLUE}${RAM_VALUE} RAM | ${CPU_CORES:-4} Cores${NC}"
+    echo -e "${WHITE}⚙️  Resources: ${LIGHT_BLUE}${RAM_VALUE} RAM | ${CPU_CORES:-2} Cores${NC}"
     echo -e "${WHITE}🚀 Port Rule : ${YELLOW}Host Port ${TCP_HOST_PORT} -> VM Port ${TCP_GUEST_PORT}${NC}"
     echo -e "${DARK_BLUE}----------------------------------------------------------${NC}"
     
@@ -197,19 +282,17 @@ boot_qemu() {
         echo -e "${GREEN}👉 $SSHX_URL 👈${NC}"
     else
         echo -e "${YELLOW}ℹ️  Web tunnel skipped (Firewall/Network restriction).${NC}"
-        echo -e "${GREEN}✅ Select Option 3 from main menu to Auto-Connect!${NC}"
+        echo -e "${GREEN}✅ To connect manually: ssh ${USER_NAME:-root}@localhost -p ${TCP_HOST_PORT}${NC}"
     fi
     
     echo -e "${DARK_BLUE}----------------------------------------------------------${NC}"
-    echo -e "${WHITE}👉 Connection Command : ${BRIGHT_BLUE}ssh ${USER_NAME:-ubuntu}@localhost -p ${TCP_HOST_PORT}${NC}"
     echo -e "${DARK_BLUE}==========================================================${NC}"
     echo ""
     
-    # 🚀 EXECUTING INTEGRATED CORE NETDEV NETWORK COMMAND STRUCTURE
     qemu-system-x86_64 \
         -hda /home/daytona/ubuntu22.qcow2 \
         -m $RAM_VALUE \
-        -smp ${CPU_CORES:-4} \
+        -smp ${CPU_CORES:-2} \
         -drive file=seed.img,format=raw \
         -nographic \
         -netdev user,id=net0,hostfwd=tcp::${TCP_HOST_PORT}-:${TCP_GUEST_PORT} \
@@ -227,37 +310,6 @@ restart_vps() {
         sleep 3
         show_menu
     fi
-}
-
-# AUTO-CONNECT PIPELINE (Uses sshpass so user doesn't have to type hidden passwords)
-auto_connect() {
-    if [ -f ".vps_env" ]; then
-        source .vps_env
-    else
-        echo -e "${RED}❌ No instance found! Please create one using Option 1.${NC}"
-        sleep 2
-        show_menu
-    fi
-
-    # Ensure sshpass is installed
-    if ! command -v sshpass &> /dev/null; then
-        echo -e "${YELLOW}⏳ Installing auto-login dependency...${NC}"
-        $SUDO_CMD apt-get install -y sshpass > /dev/null 2>&1
-    fi
-
-    echo -e "${LIGHT_BLUE}🔄 Connecting to ${USER_NAME} at localhost:${TCP_HOST_PORT}...${NC}"
-    echo -e "${YELLOW}ℹ️  Type 'exit' to return to the CodingBoyz dashboard.${NC}"
-    echo -e "${DARK_BLUE}----------------------------------------------------------${NC}"
-    sleep 1
-
-    # Automatically passes the password to SSH
-    sshpass -p "${USER_PASS}" ssh -o StrictHostKeyChecking=no ${USER_NAME}@localhost -p ${TCP_HOST_PORT}
-    
-    # Returns to menu after user types 'exit' in the VM
-    echo ""
-    echo -e "${GREEN}✅ Disconnected from VM. Returning to menu...${NC}"
-    sleep 2
-    show_menu
 }
 
 # EXECUTE TRIGGER
