@@ -100,21 +100,23 @@ show_tools_menu() {
     echo -e "${DARK_BLUE}==========================================================${NC}"
     echo ""
     echo -e "  ${BRIGHT_BLUE}[1]${NC} ${LIGHT_BLUE}⚡ Port Forwarding${NC} ${YELLOW}(Expose VPS Ports)${NC}"
-    echo -e "  ${BRIGHT_BLUE}[2]${NC} ${WHITE}⬅️  Back to Main Menu${NC}"
+    echo -e "  ${BRIGHT_BLUE}[2]${NC} ${WHITE}⚙️ Qemu Installer${NC} ${YELLOW}(Core System Files)${NC}"
+    echo -e "  ${BRIGHT_BLUE}[3]${NC} ${WHITE}⬅️  Back to Main Menu${NC}"
     echo ""
     echo -e "${DARK_BLUE}==========================================================${NC}"
-    echo -ne "${WHITE}🔹 Select Tool [1-2]: ${NC}"
+    echo -ne "${WHITE}🔹 Select Tool [1-3]: ${NC}"
     read TOOL_CHOICE
     
     case $TOOL_CHOICE in
         1) tool_port_forwarding ;;
-        2) show_menu ;;
+        2) tool_qemu_installer ;;
+        3) show_menu ;;
         *) echo -e "${RED}❌ Invalid Choice!${NC}"; sleep 2; show_tools_menu ;;
     esac
 }
 
 # ==========================================
-# TOOL 1: ENHANCED PORT FORWARDING (NO INTERNAL PORT REQUIRED)
+# TOOL 1: ENHANCED PORT FORWARDING
 # ==========================================
 tool_port_forwarding() {
     clear
@@ -149,18 +151,15 @@ tool_port_forwarding() {
         return
     fi
 
-    # QEMU default internal IP for user-mode networking
     QEMU_GUEST_IP="10.0.2.15"
     
     echo ""
     loading_bar "Binding Port $PORT_FWD to VPS"
     
-    # Forward OUTSIDE:$PORT_FWD directly to INSIDE:$PORT_FWD
     $SUDO_CMD nohup socat TCP-LISTEN:$PORT_FWD,fork,reuseaddr TCP:$QEMU_GUEST_IP:$PORT_FWD > /dev/null 2>&1 &
     SOCAT_PID=$!
     
     sleep 1
-    # Verify if socat actually started
     if kill -0 $SOCAT_PID 2>/dev/null; then
         clear
         echo -e "${DARK_BLUE}==========================================================${NC}"
@@ -174,6 +173,44 @@ tool_port_forwarding() {
         echo -e "${DARK_BLUE}==========================================================${NC}"
     else
         echo -e "${RED}❌ Failed to bind port. Ensure your VPS is running.${NC}"
+    fi
+    
+    echo ""
+    echo -ne "${WHITE}🔹 Press ENTER to return to Tools menu...${NC}"
+    read
+    show_tools_menu
+}
+
+# ==========================================
+# TOOL 2: QEMU INSTALLER
+# ==========================================
+tool_qemu_installer() {
+    clear
+    echo -e "${DARK_BLUE}==========================================================${NC}"
+    echo -e "${BRIGHT_BLUE}                 ⚙️ QEMU CORE INSTALLER ⚙️                 ${NC}"
+    echo -e "${DARK_BLUE}==========================================================${NC}"
+    echo -e "${WHITE}ℹ️  This will install the QEMU emulator and required tools.${NC}"
+    echo -e "${DARK_BLUE}----------------------------------------------------------${NC}"
+    echo ""
+    
+    loading_bar "Updating Package Lists"
+    $SUDO_CMD apt update -y > /dev/null 2>&1
+    
+    loading_bar "Installing QEMU & Dependencies"
+    # Installing exactly what you requested
+    $SUDO_CMD apt install qemu-system cloud-image-utils wget lsof -y > /dev/null 2>&1
+    
+    # Small verification check
+    if command -v qemu-system-x86_64 &> /dev/null; then
+        echo ""
+        echo -e "${GREEN}==========================================================${NC}"
+        echo -e "${GREEN}          ✅ QEMU INSTALLED SUCCESSFULLY! ✅                ${NC}"
+        echo -e "${GREEN}==========================================================${NC}"
+        echo -e "${WHITE}You can now safely create and run VPS instances.${NC}"
+        echo -e "${GREEN}==========================================================${NC}"
+    else
+        echo ""
+        echo -e "${RED}❌ Installation failed. Check your internet or apt logs.${NC}"
     fi
     
     echo ""
@@ -221,7 +258,6 @@ edit_config() {
     
     echo -e "${DARK_BLUE}----------------------------------------------------------${NC}"
     
-    # Wipe old cloud-init state to apply new password on next boot
     if [ -f "/home/daytona/ubuntu22.qcow2" ]; then
         loading_bar "Resetting VM password lock state"
         $SUDO_CMD virt-customize -a /home/daytona/ubuntu22.qcow2 --run-command 'rm -rf /var/lib/cloud/instances/*' 2>/dev/null || \
@@ -261,6 +297,22 @@ EOF
 
 # STEP 1: CREATE & BOOT NEW UBUNTU VPS INSTANCE
 create_vps() {
+    # ==========================================
+    # 🔥 QEMU SUPPORT CHECK: Stop if QEMU is missing
+    # ==========================================
+    if ! command -v qemu-system-x86_64 &> /dev/null; then
+        clear
+        echo -e "${RED}==========================================================${NC}"
+        echo -e "${RED}⚠️  ERROR: QEMU EMULATOR IS NOT INSTALLED! ⚠️               ${NC}"
+        echo -e "${RED}==========================================================${NC}"
+        echo -e "${WHITE}You cannot create a VPS without QEMU.${NC}"
+        echo -e "${YELLOW}👉 Please go to [4] Tools -> [2] Qemu Installer first.${NC}"
+        echo -e "${RED}==========================================================${NC}"
+        sleep 4
+        show_menu
+        return
+    fi
+
     clear
     echo -e "${DARK_BLUE}==========================================================${NC}"
     echo -e "${WHITE}⚙️  CONFIGURE YOUR VIRTUAL MACHINE SPECIFICATIONS${NC}"
@@ -286,11 +338,6 @@ create_vps() {
     TCP_GUEST_PORT=22
 
     echo ""
-    echo -e "${YELLOW}⏳ Background core dependencies are installing... Please wait.${NC}"
-    echo ""
-    
-    $SUDO_CMD apt-get update -y > /dev/null 2>&1
-    $SUDO_CMD apt-get install -y qemu-system-x86 qemu-utils wget cloud-image-utils curl openssh-client sshpass > /dev/null 2>&1
     
     $SUDO_CMD mkdir -p /home/daytona > /dev/null 2>&1
     
@@ -348,7 +395,7 @@ boot_qemu() {
     RAM_VALUE="${RAM_GB:-4}G"
 
     # ==========================================
-    # 🔥 THE FIX: FORCE KILL OLD VPS BEFORE STARTING
+    # 🔥 FORCE KILL OLD VPS BEFORE STARTING
     # ==========================================
     if pgrep -x "qemu-system-x86" > /dev/null; then
         echo -e "${RED}⚠️  Detected an existing VPS running. Force stopping it now...${NC}"
