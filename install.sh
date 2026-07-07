@@ -89,16 +89,18 @@ show_menu() {
 }
 
 # ==========================================
-# TOOLS SUB-MENU
+# ENHANCED TOOLS SUB-MENU
 # ==========================================
 show_tools_menu() {
     clear
     echo -e "${DARK_BLUE}==========================================================${NC}"
     echo -e "${BRIGHT_BLUE}                    🛠️  CODINGBOYZ TOOLS 🛠️                    ${NC}"
     echo -e "${DARK_BLUE}==========================================================${NC}"
+    echo -e "${WHITE}                  Advanced VPS Utilities                    ${NC}"
+    echo -e "${DARK_BLUE}==========================================================${NC}"
     echo ""
-    echo -e "  ${BRIGHT_BLUE}[1]${NC} Port Forwarding"
-    echo -e "  ${BRIGHT_BLUE}[2]${NC} Back to Main Menu"
+    echo -e "  ${BRIGHT_BLUE}[1]${NC} ${LIGHT_BLUE}⚡ Port Forwarding${NC} ${YELLOW}(Expose VPS Ports)${NC}"
+    echo -e "  ${BRIGHT_BLUE}[2]${NC} ${WHITE}⬅️  Back to Main Menu${NC}"
     echo ""
     echo -e "${DARK_BLUE}==========================================================${NC}"
     echo -ne "${WHITE}🔹 Select Tool [1-2]: ${NC}"
@@ -112,59 +114,68 @@ show_tools_menu() {
 }
 
 # ==========================================
-# TOOL 1: PORT FORWARDING
+# TOOL 1: ENHANCED PORT FORWARDING (NO INTERNAL PORT REQUIRED)
 # ==========================================
 tool_port_forwarding() {
     clear
     echo -e "${DARK_BLUE}==========================================================${NC}"
-    echo -e "${BRIGHT_BLUE}                 ⚙️ PORT FORWARDING TOOL ⚙️                 ${NC}"
+    echo -e "${BRIGHT_BLUE}                 ⚡ PORT FORWARDING TOOL ⚡                 ${NC}"
     echo -e "${DARK_BLUE}==========================================================${NC}"
-    echo -e "${YELLOW}ℹ️  This forwards a port from your MAIN server to the VPS.${NC}"
-    echo -e "${YELLOW}    (No VPS restart required! Works instantly.)${NC}"
+    echo -e "${WHITE}ℹ️  Route external traffic straight into your VPS instantly.${NC}"
+    echo -e "${WHITE}    (No VPS restart required. Applied on the fly.)${NC}"
     echo -e "${DARK_BLUE}----------------------------------------------------------${NC}"
+    echo ""
+    echo -ne "${LIGHT_BLUE}🌐 Enter the Port to open (e.g., 8080, 3000, 80): ${NC}"
+    read PORT_FWD
     
-    echo -ne "${LIGHT_BLUE}🔹 Enter MAIN SERVER Port (e.g., 8080): ${NC}"
-    read HOST_PORT
-    echo -ne "${LIGHT_BLUE}🔹 Enter VPS INTERNAL Port (e.g., 80): ${NC}"
-    read GUEST_PORT
-    
-    if [[ -z "$HOST_PORT" || -z "$GUEST_PORT" ]]; then
-        echo -e "${RED}❌ Ports cannot be empty!${NC}"
+    if [[ -z "$PORT_FWD" || ! "$PORT_FWD" =~ ^[0-9]+$ ]]; then
+        echo -e "${RED}❌ Error: Please enter a valid number for the port!${NC}"
         sleep 2
         show_tools_menu
         return
     fi
 
-    # Install socat if not present (socat is the best tool for instant port forwarding)
+    # Install socat if not present
     if ! command -v socat &> /dev/null; then
         echo -e "${YELLOW}⏳ Installing Port Forwarding dependency (socat)...${NC}"
         $SUDO_CMD apt-get install -y socat > /dev/null 2>&1
     fi
 
     # Check if port is already in use on the host
-    if $SUDO_CMD lsof -i :$HOST_PORT > /dev/null 2>&1; then
-        echo -e "${RED}❌ Error: Port $HOST_PORT is already in use on the main server!${NC}"
+    if $SUDO_CMD lsof -i :$PORT_FWD > /dev/null 2>&1; then
+        echo -e "${RED}❌ Error: Port $PORT_FWD is already in use on the main server!${NC}"
         sleep 3
         show_tools_menu
         return
     fi
 
-    # QEMU default internal IP for user-mode networking is 10.0.2.15
+    # QEMU default internal IP for user-mode networking
     QEMU_GUEST_IP="10.0.2.15"
     
     echo ""
-    loading_bar "Mapping Main Port $HOST_PORT -> VPS Port $GUEST_PORT"
+    loading_bar "Binding Port $PORT_FWD to VPS"
     
-    # Run socat in background to forward traffic
-    $SUDO_CMD nohup socat TCP-LISTEN:$HOST_PORT,fork,reuseaddr TCP:$QEMU_GUEST_IP:$GUEST_PORT > /dev/null 2>&1 &
+    # Forward OUTSIDE:$PORT_FWD directly to INSIDE:$PORT_FWD
+    $SUDO_CMD nohup socat TCP-LISTEN:$PORT_FWD,fork,reuseaddr TCP:$QEMU_GUEST_IP:$PORT_FWD > /dev/null 2>&1 &
+    SOCAT_PID=$!
     
-    echo ""
-    echo -e "${GREEN}==========================================================${NC}"
-    echo -e "${GREEN}✅ PORT FORWARDING ACTIVE!${NC}"
-    echo -e "${GREEN}==========================================================${NC}"
-    echo -e "${WHITE}🌐 If someone visits ${BRIGHT_BLUE}http://YOUR_MAIN_IP:$HOST_PORT${NC}"
-    echo -e "${WHITE}   They will automatically reach the VPS on port ${BRIGHT_BLUE}$GUEST_PORT${NC}"
-    echo -e "${GREEN}==========================================================${NC}"
+    sleep 1
+    # Verify if socat actually started
+    if kill -0 $SOCAT_PID 2>/dev/null; then
+        clear
+        echo -e "${DARK_BLUE}==========================================================${NC}"
+        echo -e "${GREEN}                    ✅ PORT ROUTING ACTIVE ✅                    ${NC}"
+        echo -e "${DARK_BLUE}==========================================================${NC}"
+        echo -e "${WHITE}🔗 Mapped Connection:${NC}"
+        echo -e "${YELLOW}      Main Server :${PORT_FWD}  ${BRIGHT_BLUE}━━━▶${NC}  ${YELLOW}VPS Internal :${PORT_FWD}${NC}"
+        echo -e "${DARK_BLUE}----------------------------------------------------------${NC}"
+        echo -e "${WHITE}💡 Anyone accessing ${BRIGHT_BLUE}http://YOUR_SERVER_IP:${PORT_FWD}${NC}"
+        echo -e "${WHITE}   will be routed directly to your VPS!"
+        echo -e "${DARK_BLUE}==========================================================${NC}"
+    else
+        echo -e "${RED}❌ Failed to bind port. Ensure your VPS is running.${NC}"
+    fi
+    
     echo ""
     echo -ne "${WHITE}🔹 Press ENTER to return to Tools menu...${NC}"
     read
